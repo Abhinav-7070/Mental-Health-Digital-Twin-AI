@@ -20,7 +20,7 @@ class MultiDetectorPipeline:
             contamination = PipelineConfig.IFOREST_CONTAMINATION,
             random_state = PipelineConfig.IFOREST_RANDOM_STATE
         )
-        self.copula = PipelineConfig(epsilon = PipelineConfig.COPULA_EPSILON)
+        self.copula = GaussianCopulaAnomalyDetector(epsilon = PipelineConfig.COPULA_EPSILON)
         self.knn = NativeKnnDistanceDetector(k = PipelineConfig.KNN_K, metric = PipelineConfig.KNN_METRIC)
         self.is_fitted: bool = False
 
@@ -53,3 +53,55 @@ class MultiDetectorPipeline:
             "knn": self.knn.predict_score(X_clean).tolist()
         }
     
+    def predict(self, X: np.ndarray) -> Dict[str, Any]:
+        scores_dict = self.predict_scores(X)
+
+        overall_risk_scores = []
+        is_anomaly_flags = []
+        detailed_records = []
+
+        w = PipelineConfig.DETECTOR_WEIGHTS
+
+        n_samples = len(X)
+        for i in range(n_samples):
+            m_s = scores_dict["mahalanobis"][i]
+            c_s = scores_dict["copula"][i]
+            if_s = scores_dict["isolation"][i]
+            k_s = scores_dict["knn"][i]
+
+            risk = (m_s * w["mahalanobis"] + 
+                    c_s * w["copula"] + 
+                    if_s * w["isolation_forest"] + 
+                    k_s * w["knn"])
+            
+            overall_risk_scores.append(risk)
+
+            m_anom = self.threshold_engine.eval_status("mahalanobis", m_s)
+            c_anom = self.threshold_engine.eval_status("copula", c_s)
+            if_anom = self.threshold_engine.eval_status("isolation_forest", if_s)
+            k_anom = self.threshold_engine.eval_status("knn", k_s)
+
+            is_anomaly_flags.append(m_anom, c_anom, if_anom, k_anom)
+
+            detailed_records.append({
+                "mahalanobis": m_s,
+                "copula": c_s,
+                "isolation_forest": if_s,
+                "knn": k_s
+            })
+
+            return {
+                "metrics_summary": detailed_records,
+                "overall_risk_score": overall_risk_scores,
+                "is_anomaly": is_anomaly_flags
+            }
+        
+        def save(self, filepath: str) -> None:
+            with open(filepath, "wb") as output_stream:
+                pickle.dump(self, output_stream)
+
+        @staticmethod
+        def load(filepath: str) -> "MultiDetectorPipeline"        :
+            with open(filepath, "rb") as input_stream:
+                return pickle.load(input_stream)       
+
